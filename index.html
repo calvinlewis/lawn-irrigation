@@ -109,7 +109,7 @@
 
   details.settings summary { cursor: pointer; font-size: 16px; font-weight: 700; color: var(--text); list-style: none; }
   details.settings summary::-webkit-details-marker { display: none; }
-  details.settings summary::before { content: "\\25B8"; display: inline-block; margin-right: 8px; transition: transform 0.2s; color: var(--muted); }
+  details.settings summary::before { content: "\25B8"; display: inline-block; margin-right: 8px; transition: transform 0.2s; color: var(--muted); }
   details.settings[open] summary::before { transform: rotate(90deg); }
   .settings-body { margin-top: 16px; display: flex; flex-direction: column; gap: 16px; }
   .hint { font-size: 12px; color: var(--muted); margin: 2px 0 0; }
@@ -206,6 +206,11 @@
           <input type="number" id="setTarget" step="1" min="5" max="75" />
           <p class="hint">Cool-season grass (Kentucky bluegrass, fine fescue, perennial ryegrass) typically wants 25&ndash;38 mm/week (rain + watering combined).</p>
         </div>
+        <div class="field">
+          <label for="setRate">Sprinkler rate (mm/hour)</label>
+          <input type="number" id="setRate" step="0.5" min="1" max="100" />
+          <p class="hint">How fast your sprinkler applies water. Used to turn the recommended amount into a run time.</p>
+        </div>
         <div>
           <button class="btn ghost" type="button" id="clearLog">Clear watering log</button>
         </div>
@@ -226,14 +231,18 @@
 const STORE = {
   target: "lawn.target",
   log: "lawn.log",
+  rate: "lawn.rate",
 };
 const COORDS = { lat: 45.2391, lon: -76.1877 };
 // Cool-season mix (Kentucky bluegrass / fine fescue / perennial ryegrass),
 // full sun. ~25-38 mm/week is typical; lean a bit high for full sun.
-const DEFAULT_TARGET = 32; // mm/week
+const DEFAULT_TARGET = 25.4; // mm/week
+const DEFAULT_RATE = 13; // mm/hour the sprinkler applies
 const SESSION_CAP = 13; // mm — recommended max per single deep watering
 const RAIN_SOON_MM = 2.5; // mm forecast worth flagging
 const SATISFIED_MM = 0.5; // mm tolerance for "no watering needed"
+const FORECAST_DAYS = 2; // days of upcoming forecast to factor into the decision
+const FORECAST_CONFIDENCE = 0.7; // credit only this fraction of forecast rain (forecasts are uncertain)
 
 // ---------- helpers ----------
 const $ = (id) => document.getElementById(id);
@@ -249,6 +258,22 @@ function saveJSON(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
 function getTarget() {
   const t = parseFloat(localStorage.getItem(STORE.target));
   return Number.isFinite(t) && t > 0 ? t : DEFAULT_TARGET;
+}
+
+function getRate() {
+  const r = parseFloat(localStorage.getItem(STORE.rate));
+  return Number.isFinite(r) && r > 0 ? r : DEFAULT_RATE;
+}
+
+// Convert a depth in mm into a sprinkler run time, given mm/hour.
+function runTimeText(mm) {
+  const rate = getRate();
+  if (!(rate > 0)) return "";
+  const minutes = Math.round((mm / rate) * 60);
+  if (minutes < 60) return `${minutes} min`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m === 0 ? `${h} hr` : `${h} hr ${m} min`;
 }
 
 // ---------- watering log ----------
@@ -377,46 +402,66 @@ function refreshRecommendation() {
   $("progRight").textContent = `${round1(target)} mm target`;
   $("progressWrap").hidden = false;
 
-  const rainSoon = upcomingRain();
+  // Forward-looking: discount upcoming forecast rain since forecasts are
+  // uncertain, then let it offset the deficit so we don't water before a storm.
+  const forecast = upcomingRain(FORECAST_DAYS);
+  const expectedRain = forecast.total * FORECAST_CONFIDENCE;
+  const adjustedNeed = needed - expectedRain;
+  const rainNote = forecast.total >= RAIN_SOON_MM
+    ? ` ~${round1(forecast.total)} mm of rain is forecast over the next ${FORECAST_DAYS} days${forecast.when ? ` (starting ${forecast.when})` : ""}.`
+    : "";
 
   if (needed <= SATISFIED_MM) {
     setStatus("ok", "No watering needed");
     $("recHeadline").textContent = "Your lawn is good for now";
     $("recSub").textContent = `Rain and watering over the last 7 days (${round1(applied)} mm) already meet your ${round1(target)} mm weekly target.`;
     $("timingWrap").hidden = true;
+  } else if (adjustedNeed <= SATISFIED_MM) {
+    // There's a real deficit, but forecast rain is expected to cover it.
+    setStatus("ok", "Hold off \u2014 rain expected");
+    $("recHeadline").textContent = "Hold off \u2014 rain should cover it";
+    $("recSub").textContent = `You're ${round1(needed)} mm short of your ${round1(target)} mm weekly target, but${rainNote || ` rain is forecast over the next ${FORECAST_DAYS} days.`} Skip watering for now and re-check after it passes.`;
+    $("timingWrap").hidden = true;
   } else {
-    const suggest = Math.min(needed, SESSION_CAP);
+    const suggest = Math.min(adjustedNeed, SESSION_CAP);
     setStatus("water", "Water soon");
-    $("recHeadline").textContent = `Water about ${round1(suggest)} mm`;
+    $("recHeadline").textContent = `Water about ${round1(suggest)} mm (~${runTimeText(suggest)})`;
     let sub = `You're ${round1(needed)} mm short of your ${round1(target)} mm weekly target. `;
-    if (needed > SESSION_CAP) {
+    if (expectedRain >= RAIN_SOON_MM) {
+      sub += `After crediting expected rain, water ~${round1(suggest)} mm.`;
+    } else if (adjustedNeed > SESSION_CAP) {
       sub += `Apply ~${round1(SESSION_CAP)} mm now (deep, infrequent watering is healthier) and check again in a day or two.`;
     } else {
       sub += `A single ${round1(suggest)} mm session should get you there.`;
     }
-    if (rainSoon && rainSoon.mm >= RAIN_SOON_MM) {
-      sub += ` Heads up: ~${round1(rainSoon.mm)} mm of rain is forecast ${rainSoon.when} \u2014 you may be able to wait.`;
-    }
+    if (rainNote) sub += rainNote;
     $("recSub").textContent = sub;
     renderTiming();
   }
 }
 
-function upcomingRain() {
+// Sum forecast precipitation over the next `days` days (after today), and label
+// the first day that has a meaningful amount of rain.
+function upcomingRain(days) {
   const d = weatherData.daily;
-  if (!d || !d.precipitation_sum) return null;
+  if (!d || !d.precipitation_sum) return { total: 0, when: null };
   const today = todayISO();
+  const tomorrow = new Date(today + "T00:00:00"); tomorrow.setDate(tomorrow.getDate() + 1);
+  const limit = new Date(today + "T00:00:00"); limit.setDate(limit.getDate() + days);
+  const limitStr = limit.toISOString().slice(0, 10);
+  let total = 0, when = null;
   for (let i = 0; i < d.time.length; i++) {
-    if (d.time[i] > today && d.precipitation_sum[i] >= RAIN_SOON_MM) {
+    if (d.time[i] <= today || d.time[i] > limitStr) continue;
+    const mm = d.precipitation_sum[i] || 0;
+    total += mm;
+    if (when === null && mm >= RAIN_SOON_MM) {
       const day = new Date(d.time[i] + "T00:00:00");
-      const tomorrow = new Date(today + "T00:00:00"); tomorrow.setDate(tomorrow.getDate() + 1);
-      const when = d.time[i] === tomorrow.toISOString().slice(0, 10)
+      when = d.time[i] === tomorrow.toISOString().slice(0, 10)
         ? "tomorrow"
         : day.toLocaleDateString(undefined, { weekday: "long" });
-      return { mm: d.precipitation_sum[i], when };
     }
   }
-  return null;
+  return { total, when };
 }
 
 // Best early-morning low-evaporation window for tomorrow (fallback: today).
@@ -548,6 +593,13 @@ function init() {
   $("setTarget").addEventListener("change", () => {
     const t = parseFloat($("setTarget").value);
     if (Number.isFinite(t) && t > 0) { localStorage.setItem(STORE.target, String(t)); refreshRecommendation(); }
+  });
+
+  // Settings: sprinkler rate
+  $("setRate").value = getRate();
+  $("setRate").addEventListener("change", () => {
+    const r = parseFloat($("setRate").value);
+    if (Number.isFinite(r) && r > 0) { localStorage.setItem(STORE.rate, String(r)); refreshRecommendation(); }
   });
 
   // Clear log

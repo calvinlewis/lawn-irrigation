@@ -42,8 +42,11 @@ Then visit http://localhost:8000.
 - **Computes a rolling 7-day water balance:**
   `applied = rainfall + your watering` vs. your weekly target.
 - **Recommends action:** if you're short of the target, it suggests how much to
-  apply (capped at ~13 mm per session to encourage deep, infrequent watering),
-  and flags upcoming rain so you don't water needlessly.
+  apply (capped at ~13 mm per session to encourage deep, infrequent watering).
+  The past 7 days measure your current deficit, while the next 2 days of
+  forecast rain are discounted (~70%, since forecasts are uncertain) and credited
+  against that deficit — so if meaningful rain is coming, it reduces the amount or
+  tells you to hold off entirely rather than watering before a storm.
 - **Recommends timing:** scans tomorrow morning's hourly forecast (≈4–10 AM) and
   picks the lowest-evaporation, low-wind window, because early-morning watering
   minimizes waste and fungal risk.
