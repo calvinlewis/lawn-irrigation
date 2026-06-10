@@ -27,6 +27,12 @@ python3 -m http.server 8000
 
 Then visit http://localhost:8000.
 
+> Tip: Your watering log and settings are saved in the browser's
+> `localStorage`. Some browsers block storage for files opened directly via
+> `file://` (Option A), especially Safari and private windows. The app still
+> works there, but your log won't persist across reloads. Serving locally
+> (Option B) — or any `http(s)` origin — guarantees persistence.
+
 ## What it does
 
 - **Uses a fixed location** (latitude `45.2391`, longitude `-76.1877`) — no

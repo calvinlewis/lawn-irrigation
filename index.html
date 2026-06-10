@@ -249,19 +249,38 @@ const $ = (id) => document.getElementById(id);
 const round1 = (n) => Math.round(n * 10) / 10;
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
+// Resilient storage: some browsers throw on localStorage access for file://
+// (opaque) origins or in private mode. Fall back to an in-memory store so the
+// app still works for the session instead of breaking on every read/write.
+const memStore = {};
+const storage = {
+  get(key) {
+    try { return localStorage.getItem(key); }
+    catch { return key in memStore ? memStore[key] : null; }
+  },
+  set(key, val) {
+    memStore[key] = val;
+    try { localStorage.setItem(key, val); } catch { /* persisted in memory only */ }
+  },
+  remove(key) {
+    delete memStore[key];
+    try { localStorage.removeItem(key); } catch { /* nothing to do */ }
+  },
+};
+
 function loadJSON(key, fallback) {
-  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
+  try { const v = storage.get(key); return v ? JSON.parse(v) : fallback; }
   catch { return fallback; }
 }
-function saveJSON(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
+function saveJSON(key, val) { storage.set(key, JSON.stringify(val)); }
 
 function getTarget() {
-  const t = parseFloat(localStorage.getItem(STORE.target));
+  const t = parseFloat(storage.get(STORE.target));
   return Number.isFinite(t) && t > 0 ? t : DEFAULT_TARGET;
 }
 
 function getRate() {
-  const r = parseFloat(localStorage.getItem(STORE.rate));
+  const r = parseFloat(storage.get(STORE.rate));
   return Number.isFinite(r) && r > 0 ? r : DEFAULT_RATE;
 }
 
@@ -277,9 +296,30 @@ function runTimeText(mm) {
 }
 
 // ---------- watering log ----------
+const MM_PER_INCH = 25.4;
+
+// Read the log and normalize each entry to a numeric `mm` amount. Older builds
+// stored amounts in inches under an `inches` field; convert those so they still
+// count toward the total instead of silently reading as NaN/0.
 function getLog() {
   const log = loadJSON(STORE.log, []);
-  return Array.isArray(log) ? log : [];
+  if (!Array.isArray(log)) return [];
+  let changed = false;
+  for (const e of log) {
+    if (!Number.isFinite(e.mm)) {
+      if (Number.isFinite(parseFloat(e.mm))) {
+        e.mm = parseFloat(e.mm);
+      } else if (Number.isFinite(parseFloat(e.inches))) {
+        e.mm = round1(parseFloat(e.inches) * MM_PER_INCH);
+      } else {
+        e.mm = 0;
+      }
+      delete e.inches;
+      changed = true;
+    }
+  }
+  if (changed) saveJSON(STORE.log, log);
+  return log;
 }
 function addWatering(date, mm) {
   const log = getLog();
@@ -592,20 +632,20 @@ function init() {
   $("setTarget").value = getTarget();
   $("setTarget").addEventListener("change", () => {
     const t = parseFloat($("setTarget").value);
-    if (Number.isFinite(t) && t > 0) { localStorage.setItem(STORE.target, String(t)); refreshRecommendation(); }
+    if (Number.isFinite(t) && t > 0) { storage.set(STORE.target, String(t)); refreshRecommendation(); }
   });
 
   // Settings: sprinkler rate
   $("setRate").value = getRate();
   $("setRate").addEventListener("change", () => {
     const r = parseFloat($("setRate").value);
-    if (Number.isFinite(r) && r > 0) { localStorage.setItem(STORE.rate, String(r)); refreshRecommendation(); }
+    if (Number.isFinite(r) && r > 0) { storage.set(STORE.rate, String(r)); refreshRecommendation(); }
   });
 
   // Clear log
   $("clearLog").addEventListener("click", () => {
     if (confirm("Delete all logged waterings? This can't be undone.")) {
-      localStorage.removeItem(STORE.log);
+      storage.remove(STORE.log);
       renderLog(); renderDays(); refreshRecommendation();
     }
   });
